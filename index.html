@@ -95,11 +95,21 @@
       .then(function (vi) {
         view = vi;
         view.showUI = false;
+        view.setUIPartVisible('floorSelector', true);
         log('View created');
 
         view.addEventListener('poiclick', function (event) {
           var poi = event.pois && event.pois[0];
           if (!poi) return;
+
+          // Bâtiments (B1, B2, B3, B4…) : ouvrir le bâtiment, ne pas envoyer POI_SELECTED
+          var building = venue.venueLayout.buildings.find(function (b) { return b.id === poi.id; });
+          if (building) {
+            log('goToBuilding ' + building.id);
+            view.goToBuilding(building);
+            return;
+          }
+
           var label = poi.labels && poi.labels[0] ? poi.labels[0].text || poi.id : poi.id;
           log('POI_SELECTED ' + poi.id);
           sendToRN('POI_SELECTED', {
