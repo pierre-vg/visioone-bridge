@@ -1,0 +1,286 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+  <title>VisioOne Bridge Demo</title>
+
+  <!-- VisioOne styles -->
+  <link rel="stylesheet" href="vendor/style.css" />
+
+  <style>
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; height: 100%; overflow: hidden; background: #1a1a2e; }
+
+    #map {
+      width: 100%;
+      height: 100%;
+      position: absolute;
+      top: 0; left: 0;
+    }
+
+    #debug {
+      display: none;
+      position: fixed;
+      bottom: 0; left: 0; right: 0;
+      background: rgba(0,0,0,0.85);
+      color: #0f0;
+      font: 11px/1.6 monospace;
+      padding: 8px 12px;
+      max-height: 160px;
+      overflow-y: auto;
+      z-index: 9999;
+      border-top: 1px solid #333;
+    }
+    #debug.visible { display: block; }
+  </style>
+</head>
+<body>
+
+  <div id="map"></div>
+  <div id="debug"></div>
+
+  <!-- Stub require so the UMD's require('./style.css') is a no-op in browser -->
+  <script>window.require = function() { return {}; };</script>
+  <!-- VisioOne UMD bundle → exposes window.VisioOne -->
+  <script src="vendor/visioone.umd.js"></script>
+
+  <script>
+  (function () {
+    'use strict';
+
+    var IS_RN = typeof window.ReactNativeWebView !== 'undefined';
+
+    if (!IS_RN) {
+      document.getElementById('debug').classList.add('visible');
+    }
+
+    function log(msg) {
+      var el = document.getElementById('debug');
+      var line = document.createElement('div');
+      line.textContent = '[' + new Date().toISOString().substr(11, 8) + '] ' + msg;
+      el.appendChild(line);
+      el.scrollTop = el.scrollHeight;
+      console.log('[Bridge]', msg);
+    }
+
+    function sendToRN(type, payload) {
+      var data = JSON.stringify({ type: type, payload: payload || {} });
+      if (window.ReactNativeWebView) {
+        window.ReactNativeWebView.postMessage(data);
+      } else {
+        log('→ RN : ' + data);
+      }
+    }
+
+    window.sendToRN = sendToRN;
+
+    // ── State ─────────────────────────────────────────────────────────────
+    var venue = null;
+    var view = null;
+    var currentNavigationTrace = null;
+    var HASH = 'k0c77e25bdfdce74afc69f677bc1f826791eac441';
+
+    // ── Init ──────────────────────────────────────────────────────────────
+    var visioOne = window.VisioOne.createVisioOne();
+
+    visioOne.showLoader(document.getElementById('map'));
+
+    visioOne.loadVenue({ hash: HASH })
+      .then(function (v) {
+        venue = v;
+        log('Venue loaded — ' + venue.pois.length + ' POIs');
+        return visioOne.createView(document.getElementById('map'), venue);
+      })
+      .then(function (vi) {
+        view = vi;
+        view.showUI = false;
+        view.setUIPartVisible('floorSelector', true);
+        log('View created');
+
+        view.addEventListener('poiclick', function (event) {
+          var poi = event.pois && event.pois[0];
+          if (!poi) return;
+
+          // Bâtiments (B1, B2, B3, B4…) : ouvrir le bâtiment, ne pas envoyer POI_SELECTED
+          var building = venue.venueLayout.buildings.find(function (b) { return b.id === poi.id; });
+          if (building) {
+            log('goToBuilding ' + building.id);
+            view.goToBuilding(building);
+            return;
+          }
+
+          var label = poi.labels && poi.labels[0] ? poi.labels[0].text || poi.id : poi.id;
+          log('POI_SELECTED ' + poi.id);
+          sendToRN('POI_SELECTED', {
+            poi: {
+              id: poi.id,
+              name: label,
+              floor: poi.floor ? poi.floor.id : '',
+              category: poi.categories && poi.categories[0] ? poi.categories[0].id : null,
+            },
+          });
+        });
+
+        view.addEventListener('currentfloorchanged', function (event) {
+          var floor = event.newFloor || view.currentFloor;
+          var floorId = floor ? floor.id : '';
+          log('FLOOR_CHANGED ' + floorId);
+          sendToRN('FLOOR_CHANGED', { floorId: floorId });
+        });
+
+        log('MAP_READY');
+        sendToRN('MAP_READY', {});
+      })
+      .catch(function (err) {
+        log('Init error: ' + err.message);
+        visioOne.showError(err, document.getElementById('map'));
+      });
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+
+    function findPOI(poiId) {
+      if (!venue) return null;
+      return venue.pois.find(function (p) { return p.id === poiId; }) || null;
+    }
+
+    function getPOILabel(poi) {
+      return poi.labels && poi.labels[0] ? poi.labels[0].text || poi.id : poi.id;
+    }
+
+    function findFloor(floorId) {
+      if (!venue) return null;
+      var layout = venue.venueLayout;
+      if (layout.outside && layout.outside.id === floorId) return layout.outside;
+      for (var i = 0; i < layout.buildings.length; i++) {
+        var floors = layout.buildings[i].floors;
+        for (var j = 0; j < floors.length; j++) {
+          if (floors[j].id === floorId) return floors[j];
+        }
+      }
+      return null;
+    }
+
+    function clearRoute() {
+      if (currentNavigationTrace && view) {
+        view.removeCurrentNavigationTrace();
+        venue.removeNavigationTrace(currentNavigationTrace);
+      }
+      currentNavigationTrace = null;
+    }
+
+    // ── Commands React Native → VisioOne ──────────────────────────────────
+    window.addEventListener('rnCommand', function (event) {
+      var cmd = event.detail;
+      log('← RN : ' + JSON.stringify(cmd));
+
+      if (!venue || !view) {
+        log('Not ready yet');
+        return;
+      }
+
+      switch (cmd.type) {
+
+        case 'SEARCH_POI': {
+          var query = (cmd.payload.query || '').toLowerCase().trim();
+          var results = venue.pois.filter(function (poi) {
+            if (!query) return false;
+            if (poi.id.toLowerCase().includes(query)) return true;
+            return poi.labels.some(function (lbl) {
+              return lbl.text && lbl.text.toLowerCase().includes(query);
+            });
+          }).slice(0, 20);
+
+          sendToRN('SEARCH_RESULTS', {
+            query: cmd.payload.query,
+            pois: results.map(function (p) {
+              return {
+                id: p.id,
+                name: getPOILabel(p),
+                floor: p.floor ? p.floor.id : '',
+                category: p.categories && p.categories[0] ? p.categories[0].id : null,
+              };
+            }),
+          });
+          break;
+        }
+
+        case 'NAVIGATE_TO': {
+          var destPOI = findPOI(cmd.payload.poiId);
+          if (!destPOI) {
+            log('NAVIGATE_TO: POI not found ' + cmd.payload.poiId);
+            break;
+          }
+          clearRoute();
+          if (destPOI.floor) {
+            view.goToFloor(destPOI.floor);
+          }
+          view.goToPOI(destPOI);
+          view.selectedPOIs = [destPOI];
+          sendToRN('NAVIGATION_STARTED', {
+            route: { steps: [], duration: 0, distance: 0 },
+          });
+          break;
+        }
+
+        case 'CREATE_ROUTE': {
+          var from = cmd.payload.from;
+          var to = cmd.payload.to;
+          if (!from || !to) {
+            log('CREATE_ROUTE: missing from/to');
+            break;
+          }
+          try {
+            clearRoute();
+            var nav = venue.computeNavigation({
+              origin: from,
+              destination: to,
+              mergeFloorChangeInstructions: true,
+            });
+            currentNavigationTrace = venue.createNavigationTrace(nav);
+            view.setCurrentNavigationTrace(currentNavigationTrace);
+
+            var totalDist = 0;
+            var totalDur = 0;
+            var steps = nav.instructions.map(function (ins) {
+              totalDist += ins.length || 0;
+              totalDur += ins.duration || 0;
+              return {
+                instruction: ins.detailedInstruction || '',
+                distance: Math.round(ins.length || 0),
+                duration: Math.round(ins.duration || 0),
+              };
+            });
+            sendToRN('ROUTE_READY', {
+              steps: steps,
+              distance: Math.round(totalDist),
+              duration: Math.round(totalDur),
+            });
+          } catch (err) {
+            log('CREATE_ROUTE error: ' + err.message);
+            sendToRN('ROUTE_READY', { steps: [], distance: 0, duration: 0 });
+          }
+          break;
+        }
+
+        case 'SET_FLOOR': {
+          var floor = findFloor(cmd.payload.floorId);
+          if (floor) {
+            view.goToFloor(floor);
+          } else {
+            log('SET_FLOOR: floor not found ' + cmd.payload.floorId);
+          }
+          break;
+        }
+
+        default:
+          log('Unknown command: ' + cmd.type);
+      }
+    });
+
+    log('Bridge ready (RN=' + IS_RN + ')');
+  })();
+  </script>
+
+</body>
+</html>
