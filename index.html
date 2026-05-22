@@ -94,6 +94,7 @@
       })
       .then(function (vi) {
         view = vi;
+        view.showUI = false;
         log('View created');
 
         view.addEventListener('poiclick', function (event) {
